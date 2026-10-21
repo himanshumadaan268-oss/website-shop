@@ -10,6 +10,10 @@ import {
 import "./styles.css";
 
 const API_URL = "https://website-shop-ibh3.onrender.com/api";
+const CLOUDINARY_CLOUD_NAME = "edxmphzf";
+const CLOUDINARY_UPLOAD_PRESET = "tony_property_upload";
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+
 const whatsappNumber = "91XXXXXXXXXX"; // Replace with your real WhatsApp number.
 
 const categories = [
@@ -21,7 +25,7 @@ const categories = [
   ["Office", "Offices", BriefcaseBusiness]
 ];
 
-// Convert a MySQL record into the format used by the existing website.
+// Convert a MySQL record into the format used by the website.
 function fromDatabase(p) {
   const price = Number(p.price) || 0;
 
@@ -54,11 +58,17 @@ function toDatabase(p) {
     throw new Error("Area must be a numeric value in square feet.");
   }
 
+  const price = Number(p.price);
+
+  if (!Number.isFinite(price) || price < 0) {
+    throw new Error("Please enter a valid property price.");
+  }
+
   return {
     title: p.title.trim(),
     property_type: p.type,
     listing_type: p.status === "For Sale" ? "Sale" : "Rent",
-    price: Number(p.price),
+    price,
     location: p.location.trim(),
     description: p.description || "",
     image_url: p.image || "",
@@ -82,11 +92,17 @@ function App() {
   const [menu, setMenu] = useState(false);
   const [saved, setSaved] = useState([]);
   const [filtersOpen, setFiltersOpen] = useState(false);
+
   const [admin, setAdmin] = useState(false);
   const [loggedIn, setLoggedIn] = useState(false);
   const [editing, setEditing] = useState(null);
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Cloudinary photo-upload state.
+  const [selectedPhoto, setSelectedPhoto] = useState(null);
+  const [photoPreview, setPhotoPreview] = useState("");
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
   const blankProperty = {
     title: "",
@@ -105,7 +121,7 @@ function App() {
 
   const [form, setForm] = useState(blankProperty);
 
-  // Load all property records from MySQL on startup.
+  // Load property records from MySQL.
   async function loadProperties() {
     setLoading(true);
 
@@ -133,6 +149,57 @@ function App() {
     loadProperties();
   }, []);
 
+  // Upload an image directly to Cloudinary.
+  // The returned secure URL is stored in the existing MySQL image_url column.
+  async function uploadPhoto(file) {
+    if (!file) return form.image || "";
+
+    if (!file.type.startsWith("image/")) {
+      throw new Error("Please select an image file.");
+    }
+
+    if (file.size > MAX_IMAGE_SIZE) {
+      throw new Error("Please choose an image smaller than 5 MB.");
+    }
+
+    const uploadData = new FormData();
+    uploadData.append("file", file);
+    uploadData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+
+    setUploadingPhoto(true);
+
+    try {
+      const response = await fetch(
+        `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+        {
+          method: "POST",
+          body: uploadData
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.error?.message || "Could not upload the photo to Cloudinary."
+        );
+      }
+
+      if (!data.secure_url) {
+        throw new Error("Cloudinary did not return an image URL.");
+      }
+
+      return data.secure_url;
+    } finally {
+      setUploadingPhoto(false);
+    }
+  }
+
+  const resetPhotoSelection = () => {
+    setSelectedPhoto(null);
+    setPhotoPreview("");
+  };
+
   const openAdmin = () => {
     if (!loggedIn) {
       const pass = window.prompt(
@@ -150,7 +217,8 @@ function App() {
     setAdmin(true);
     setSelected(null);
     setEditing(null);
-    setForm(blankProperty);
+    setForm({ ...blankProperty });
+    resetPhotoSelection();
     setNotice("");
   };
 
@@ -167,17 +235,28 @@ function App() {
       tags: p.tags || []
     });
 
+    // Keep the existing image unless a replacement is selected.
+    resetPhotoSelection();
     setNotice("");
   };
 
-  // Add a new record or update an existing record in MySQL.
+  // Add a new property or update an existing property in MySQL.
   const submitProperty = async (e) => {
     e.preventDefault();
     setBusy(true);
     setNotice("");
 
     try {
-      const payload = toDatabase(form);
+      // Upload a newly selected image before saving the property.
+      const uploadedImage = selectedPhoto
+        ? await uploadPhoto(selectedPhoto)
+        : form.image;
+
+      const payload = toDatabase({
+        ...form,
+        image: uploadedImage
+      });
+
       const url = editing
         ? `${API_URL}/properties/${editing}`
         : `${API_URL}/properties`;
@@ -205,7 +284,9 @@ function App() {
       );
 
       setEditing(null);
-      setForm(blankProperty);
+      setForm({ ...blankProperty });
+      resetPhotoSelection();
+
       setNotice(
         editing
           ? "Property updated successfully in MySQL."
@@ -239,6 +320,12 @@ function App() {
       setProperties((current) => current.filter((p) => p.id !== id));
 
       if (selected?.id === id) setSelected(null);
+
+      if (editing === id) {
+        setEditing(null);
+        setForm({ ...blankProperty });
+        resetPhotoSelection();
+      }
 
       setNotice("Property deleted from MySQL.");
     } catch (error) {
@@ -482,15 +569,51 @@ function App() {
               </label>
 
               <label>
-                Photo URL
+                Property Photo
                 <input
-                  required
-                  type="url"
-                  value={form.image}
-                  onChange={(e) => setForm({ ...form, image: e.target.value })}
-                  placeholder="https://..."
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  required={!form.image && !selectedPhoto}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+
+                    if (!file.type.startsWith("image/")) {
+                      window.alert("Please select an image file.");
+                      e.target.value = "";
+                      return;
+                    }
+
+                    if (file.size > MAX_IMAGE_SIZE) {
+                      window.alert("Please choose an image smaller than 5 MB.");
+                      e.target.value = "";
+                      return;
+                    }
+
+                    setSelectedPhoto(file);
+                    setPhotoPreview(URL.createObjectURL(file));
+                  }}
                 />
               </label>
+
+              {(photoPreview || form.image) && (
+                <div className="photo-preview">
+                  <img
+                    src={photoPreview || form.image}
+                    alt="Property preview"
+                    style={{
+                      width: "200px",
+                      height: "140px",
+                      objectFit: "cover",
+                      borderRadius: "8px",
+                      marginTop: "10px"
+                    }}
+                  />
+                  {selectedPhoto && (
+                    <p>Selected: {selectedPhoto.name}</p>
+                  )}
+                </div>
+              )}
 
               <label>
                 Description
@@ -503,8 +626,14 @@ function App() {
               </label>
 
               <div className="admin-actions">
-                <button className="primary" type="submit" disabled={busy}>
-                  {busy
+                <button
+                  className="primary"
+                  type="submit"
+                  disabled={busy || uploadingPhoto}
+                >
+                  {uploadingPhoto
+                    ? "Uploading photo..."
+                    : busy
                     ? "Saving..."
                     : editing
                     ? "Save changes"
@@ -517,7 +646,8 @@ function App() {
                     className="clear"
                     onClick={() => {
                       setEditing(null);
-                      setForm(blankProperty);
+                      setForm({ ...blankProperty });
+                      resetPhotoSelection();
                       setNotice("");
                     }}
                   >
