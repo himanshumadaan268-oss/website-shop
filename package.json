@@ -1,0 +1,26 @@
+{
+  "name": "tony-property-dealers",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.8",
+    "express": "^5.3.0",
+    "lucide-react": "latest",
+    "mysql2": "^3.24.6",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  },
+  "allowScripts": {
+    "bcrypt@6.0.0": true
+  }
+}
