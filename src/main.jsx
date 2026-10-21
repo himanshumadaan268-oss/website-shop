@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-const API_URL = "http://localhost:5000/api";
+const API_URL = "https://website-shop-ibh3.onrender.com/api";
 const whatsappNumber = "91XXXXXXXXXX"; // Replace with your real WhatsApp number.
 
 const categories = [
@@ -117,6 +117,7 @@ function App() {
       }
 
       const data = await response.json();
+      console.log("Properties received from API:", data);
       setProperties(data.map(fromDatabase));
     } catch (error) {
       console.error(error);
