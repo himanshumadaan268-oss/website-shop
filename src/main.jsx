@@ -13,6 +13,7 @@ const API_URL = "https://website-shop-ibh3.onrender.com/api";
 const CLOUDINARY_CLOUD_NAME = "edxmphzf";
 const CLOUDINARY_UPLOAD_PRESET = "tony_property_upload";
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+const MAX_VIDEO_SIZE = 100 * 1024 * 1024;
 
 const whatsappNumber = "91XXXXXXXXXX"; // Replace with your real WhatsApp number.
 
@@ -41,6 +42,10 @@ function fromDatabase(p) {
       maximumFractionDigits: 0
     }).format(price),
     image: p.image_url || "",
+    gallery: Array.isArray(p.gallery_urls) ? p.gallery_urls : (() => {
+      try { return JSON.parse(p.gallery_urls || "[]"); } catch { return []; }
+    })(),
+    video: p.video_url || "",
     area: p.area_sqft ? `${Number(p.area_sqft)} sq ft` : "",
     beds: Number(p.bedrooms) || 0,
     baths: Number(p.bathrooms) || 0,
@@ -72,6 +77,8 @@ function toDatabase(p) {
     location: p.location.trim(),
     description: p.description || "",
     image_url: p.image || "",
+    gallery_urls: p.gallery || [],
+    video_url: p.video || "",
     bedrooms: Number(p.beds) || 0,
     bathrooms: Number(p.baths) || 0,
     area_sqft: area,
@@ -100,9 +107,11 @@ function App() {
   const [busy, setBusy] = useState(false);
 
   // Cloudinary photo-upload state.
-  const [selectedPhoto, setSelectedPhoto] = useState(null);
-  const [photoPreview, setPhotoPreview] = useState("");
-  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [selectedPhotos, setSelectedPhotos] = useState([]);
+  const [photoPreviews, setPhotoPreviews] = useState([]);
+  const [selectedVideo, setSelectedVideo] = useState(null);
+  const [videoPreview, setVideoPreview] = useState("");
+  const [uploadingMedia, setUploadingMedia] = useState(false);
 
   const blankProperty = {
     title: "",
@@ -115,6 +124,8 @@ function App() {
     beds: "",
     baths: "",
     image: "",
+    gallery: [],
+    video: "",
     description: "",
     tags: []
   };
@@ -149,55 +160,41 @@ function App() {
     loadProperties();
   }, []);
 
-  // Upload an image directly to Cloudinary.
-  // The returned secure URL is stored in the existing MySQL image_url column.
   async function uploadPhoto(file) {
-    if (!file) return form.image || "";
-
-    if (!file.type.startsWith("image/")) {
-      throw new Error("Please select an image file.");
-    }
-
-    if (file.size > MAX_IMAGE_SIZE) {
-      throw new Error("Please choose an image smaller than 5 MB.");
-    }
-
+    if (!file || !file.type.startsWith("image/")) throw new Error("Please select valid image files.");
+    if (file.size > MAX_IMAGE_SIZE) throw new Error(`${file.name} is larger than 5 MB.`);
     const uploadData = new FormData();
     uploadData.append("file", file);
     uploadData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
-
-    setUploadingPhoto(true);
-
-    try {
-      const response = await fetch(
-        `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
-        {
-          method: "POST",
-          body: uploadData
-        }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          data.error?.message || "Could not upload the photo to Cloudinary."
-        );
-      }
-
-      if (!data.secure_url) {
-        throw new Error("Cloudinary did not return an image URL.");
-      }
-
-      return data.secure_url;
-    } finally {
-      setUploadingPhoto(false);
-    }
+    const response = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, {
+      method: "POST", body: uploadData
+    });
+    const data = await response.json();
+    if (!response.ok || !data.secure_url) throw new Error(data.error?.message || `Could not upload ${file.name}.`);
+    return data.secure_url;
   }
 
-  const resetPhotoSelection = () => {
-    setSelectedPhoto(null);
-    setPhotoPreview("");
+  async function uploadVideo(file) {
+    if (!file || !file.type.startsWith("video/")) throw new Error("Please select a valid video file.");
+    if (file.size > MAX_VIDEO_SIZE) throw new Error("Please choose a video smaller than 100 MB.");
+    const uploadData = new FormData();
+    uploadData.append("file", file);
+    uploadData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+    const response = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/video/upload`, {
+      method: "POST", body: uploadData
+    });
+    const data = await response.json();
+    if (!response.ok || !data.secure_url) {
+      throw new Error(data.error?.message || "Could not upload the video. Check that your Cloudinary upload preset allows video files.");
+    }
+    return data.secure_url;
+  }
+
+  const resetMediaSelection = () => {
+    setSelectedPhotos([]);
+    setPhotoPreviews([]);
+    setSelectedVideo(null);
+    setVideoPreview("");
   };
 
   const openAdmin = () => {
@@ -218,7 +215,7 @@ function App() {
     setSelected(null);
     setEditing(null);
     setForm({ ...blankProperty });
-    resetPhotoSelection();
+    resetMediaSelection();
     setNotice("");
   };
 
@@ -236,7 +233,7 @@ function App() {
     });
 
     // Keep the existing image unless a replacement is selected.
-    resetPhotoSelection();
+    resetMediaSelection();
     setNotice("");
   };
 
@@ -247,15 +244,14 @@ function App() {
     setNotice("");
 
     try {
-      // Upload a newly selected image before saving the property.
-      const uploadedImage = selectedPhoto
-        ? await uploadPhoto(selectedPhoto)
-        : form.image;
-
-      const payload = toDatabase({
-        ...form,
-        image: uploadedImage
-      });
+      setUploadingMedia(true);
+      const uploadedPhotos = selectedPhotos.length ? await Promise.all(selectedPhotos.map(uploadPhoto)) : [];
+      const savedGallery = Array.isArray(form.gallery) ? form.gallery : [];
+      const existingGallery = savedGallery.length ? savedGallery : (form.image ? [form.image] : []);
+      const gallery = [...existingGallery, ...uploadedPhotos];
+      const uploadedVideo = selectedVideo ? await uploadVideo(selectedVideo) : (form.video || "");
+      const mainImage = uploadedPhotos[0] || form.image || gallery[0] || "";
+      const payload = toDatabase({ ...form, image: mainImage, gallery, video: uploadedVideo });
 
       const url = editing
         ? `${API_URL}/properties/${editing}`
@@ -285,7 +281,7 @@ function App() {
 
       setEditing(null);
       setForm({ ...blankProperty });
-      resetPhotoSelection();
+      resetMediaSelection();
 
       setNotice(
         editing
@@ -297,6 +293,7 @@ function App() {
       setNotice(error.message || "Could not save the property.");
     } finally {
       setBusy(false);
+      setUploadingMedia(false);
     }
   };
 
@@ -324,7 +321,7 @@ function App() {
       if (editing === id) {
         setEditing(null);
         setForm({ ...blankProperty });
-        resetPhotoSelection();
+        resetMediaSelection();
       }
 
       setNotice("Property deleted from MySQL.");
@@ -569,51 +566,75 @@ function App() {
               </label>
 
               <label>
-                Property Photo
+                Upload property photos (select multiple)
                 <input
                   type="file"
                   accept="image/jpeg,image/png,image/webp,image/gif"
-                  required={!form.image && !selectedPhoto}
+                  multiple
+                  required={!form.image && selectedPhotos.length === 0}
                   onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-
-                    if (!file.type.startsWith("image/")) {
-                      window.alert("Please select an image file.");
+                    const files = Array.from(e.target.files || []);
+                    if (files.some((file) => !file.type.startsWith("image/"))) {
+                      window.alert("Please select image files only.");
                       e.target.value = "";
                       return;
                     }
-
-                    if (file.size > MAX_IMAGE_SIZE) {
-                      window.alert("Please choose an image smaller than 5 MB.");
+                    const tooLarge = files.find((file) => file.size > MAX_IMAGE_SIZE);
+                    if (tooLarge) {
+                      window.alert(`${tooLarge.name} is larger than 5 MB.`);
                       e.target.value = "";
                       return;
                     }
-
-                    setSelectedPhoto(file);
-                    setPhotoPreview(URL.createObjectURL(file));
+                    setSelectedPhotos(files);
+                    setPhotoPreviews(files.map((file) => URL.createObjectURL(file)));
                   }}
                 />
               </label>
 
-              {(photoPreview || form.image) && (
-                <div className="photo-preview">
-                  <img
-                    src={photoPreview || form.image}
-                    alt="Property preview"
-                    style={{
-                      width: "200px",
-                      height: "140px",
-                      objectFit: "cover",
-                      borderRadius: "8px",
-                      marginTop: "10px"
-                    }}
-                  />
-                  {selectedPhoto && (
-                    <p>Selected: {selectedPhoto.name}</p>
-                  )}
-                </div>
+              <div className="photo-preview" style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
+                {photoPreviews.map((src, index) => (
+                  <img key={src} src={src} alt={`Selected property ${index + 1}`}
+                    style={{ width: "130px", height: "95px", objectFit: "cover", borderRadius: "8px" }} />
+                ))}
+                {photoPreviews.length === 0 && (form.gallery || []).map((src, index) => (
+                  <img key={`${src}-${index}`} src={src} alt={`Saved property ${index + 1}`}
+                    style={{ width: "130px", height: "95px", objectFit: "cover", borderRadius: "8px" }} />
+                ))}
+                {photoPreviews.length === 0 && !form.gallery?.length && form.image && (
+                  <img src={form.image} alt="Current property photo"
+                    style={{ width: "130px", height: "95px", objectFit: "cover", borderRadius: "8px" }} />
+                )}
+              </div>
+              {selectedPhotos.length > 0 && <p>{selectedPhotos.length} photo(s) selected. New photos will be added to the existing gallery.</p>}
+
+              <label>
+                Upload property video (optional, max 100 MB)
+                <input
+                  type="file"
+                  accept="video/*"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    if (!file.type.startsWith("video/")) {
+                      window.alert("Please select a video file.");
+                      e.target.value = "";
+                      return;
+                    }
+                    if (file.size > MAX_VIDEO_SIZE) {
+                      window.alert("Please choose a video smaller than 100 MB.");
+                      e.target.value = "";
+                      return;
+                    }
+                    setSelectedVideo(file);
+                    setVideoPreview(URL.createObjectURL(file));
+                  }}
+                />
+              </label>
+              {(videoPreview || form.video) && (
+                <video controls src={videoPreview || form.video}
+                  style={{ width: "100%", maxWidth: "360px", marginTop: "10px", borderRadius: "8px" }} />
               )}
+              {selectedVideo && <p>Selected video: {selectedVideo.name}</p>}
 
               <label>
                 Description
@@ -629,10 +650,10 @@ function App() {
                 <button
                   className="primary"
                   type="submit"
-                  disabled={busy || uploadingPhoto}
+                  disabled={busy || uploadingMedia}
                 >
-                  {uploadingPhoto
-                    ? "Uploading photo..."
+                  {uploadingMedia
+                    ? "Uploading media..."
                     : busy
                     ? "Saving..."
                     : editing
@@ -647,7 +668,7 @@ function App() {
                     onClick={() => {
                       setEditing(null);
                       setForm({ ...blankProperty });
-                      resetPhotoSelection();
+                      resetMediaSelection();
                       setNotice("");
                     }}
                   >
@@ -729,6 +750,28 @@ function App() {
               <p className="tiny">Please confirm property details and availability with the business.</p>
             </div>
           </div>
+
+          {(selected.gallery?.length > 0 || selected.image) && (
+            <section style={{ marginTop: "28px" }}>
+              <h2>Property photos</h2>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "12px" }}>
+                {(selected.gallery?.length ? selected.gallery : [selected.image]).map((src, index) => (
+                  <img key={`${src}-${index}`} src={src} alt={`${selected.title} photo ${index + 1}`}
+                    loading="lazy"
+                    style={{ width: "min(100%, 280px)", height: "200px", objectFit: "cover", borderRadius: "10px" }} />
+                ))}
+              </div>
+            </section>
+          )}
+          {selected.video && (
+            <section style={{ marginTop: "28px" }}>
+              <h2>Property video</h2>
+              <video controls preload="metadata" src={selected.video}
+                style={{ width: "100%", maxWidth: "760px", borderRadius: "10px" }}>
+                Your browser does not support video playback.
+              </video>
+            </section>
+          )}
         </main>
       ) : (
         <main>
